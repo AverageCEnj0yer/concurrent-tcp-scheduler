@@ -1,0 +1,23 @@
+# Build outputs
+build/
+server/build/
+client/target/
+
+# IDE & language server caches
+.cache/
+server/.cache/
+.vscode/
+.idea/
+*.iml
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.out
+compile_commands.json
+
+# OS files
+.DS_Store
+Thumbs.db
