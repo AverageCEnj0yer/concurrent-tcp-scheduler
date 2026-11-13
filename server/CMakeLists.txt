@@ -9,12 +9,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_library(server_core STATIC
     src/concurrency/ThreadPool.cpp
 )
 
 target_include_directories(server_core PUBLIC include)
 target_link_libraries(server_core PUBLIC
+    nlohmann_json::nlohmann_json
     Threads::Threads
 )
 target_compile_options(server_core PRIVATE
