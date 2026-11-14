@@ -3,7 +3,10 @@
 
 #include <array>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+#include <variant>
 
 namespace protocol{
 
@@ -107,6 +110,74 @@ namespace protocol{
         }
         return std::nullopt;
     }
+
+    // Shared data structure
+    struct Items {
+        int coffee{};
+        int tea{};
+        int croissant{};
+    };
+
+    // Reusable message structures
+    struct EmptyMessage {
+        MessageType type{};
+    };
+
+    struct ItemsMessage {
+        MessageType type{};
+        Items items{};
+    };
+
+    struct AcceptedMessage {
+        MessageType type{};
+        int orderId{};
+        int preparationTime{};
+    };
+
+    struct RefusedMessage {
+        MessageType type{};
+        std::string reason{};
+    };
+
+    struct OrderIdMessage {
+        MessageType type{};
+        int orderId{};
+    };
+
+    struct LowStockMessage {
+        MessageType type{};
+        Product product{};
+        int remaining{};
+    };
+
+    struct ErrorMessage {
+        MessageType type{};
+        ErrorCode code{};
+        std::string message{};
+    };
+
+    // Protocol validation exception carrying the ErrorCode and descriptive message
+    class ProtocolException : public std::runtime_error {
+    public:
+        ProtocolException(ErrorCode code, const std::string& message)
+            : std::runtime_error(message), code_(code) {}
+
+        ErrorCode code() const noexcept { return code_; }
+
+    private:
+        ErrorCode code_;
+    };
+
+    // Top-level message variant
+    using AnyMessage = std::variant<
+        EmptyMessage,
+        ItemsMessage,
+        AcceptedMessage,
+        RefusedMessage,
+        OrderIdMessage,
+        LowStockMessage,
+        ErrorMessage
+    >;
 
 }
 
