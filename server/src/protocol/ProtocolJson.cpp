@@ -149,4 +149,211 @@ namespace protocol{
         items = parsed;
     }
 
+    // EmptyMessage (MENU_REQUEST, PROVIDER_IDENTIFY, HEARTBEAT)
+    void to_json(json& j, const EmptyMessage& msg) {
+        detail::validate_message_type(msg.type,
+            {MessageType::MENU_REQUEST, MessageType::PROVIDER_IDENTIFY, MessageType::HEARTBEAT}, "EmptyMessage");
+        j = json{
+            {"type", msg.type}
+        };
+    }
+
+    void from_json(const json& j, EmptyMessage& msg) {
+        detail::validate_object_keys(j, {"type"}, {"type"});
+        EmptyMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type,
+            {MessageType::MENU_REQUEST, MessageType::PROVIDER_IDENTIFY, MessageType::HEARTBEAT}, "EmptyMessage");
+        msg = parsed;
+    }
+
+    // ItemsMessage (ORDER_REQUEST, MENU_RESPONSE, DELIVERY)
+    void to_json(json& j, const ItemsMessage& msg) {
+        detail::validate_message_type(msg.type,
+            {MessageType::ORDER_REQUEST, MessageType::MENU_RESPONSE, MessageType::DELIVERY}, "ItemsMessage");
+        json items_json = msg.items;
+        if (msg.type == MessageType::ORDER_REQUEST && !detail::has_positive_item(msg.items)) {
+            throw ProtocolException(ErrorCode::INVALID_QUANTITY,
+                "Order must contain at least one item with positive quantity");
+        }
+        if (msg.type == MessageType::DELIVERY && !detail::has_positive_item(msg.items)) {
+            throw ProtocolException(ErrorCode::INVALID_DELIVERY,
+                "Delivery must contain at least one item with positive quantity");
+        }
+        j = json{
+            {"type", msg.type},
+            {"items", std::move(items_json)}
+        };
+    }
+
+    void from_json(const json& j, ItemsMessage& msg) {
+        detail::validate_object_keys(j, {"type", "items"}, {"type", "items"});
+        ItemsMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type,
+            {MessageType::ORDER_REQUEST, MessageType::MENU_RESPONSE, MessageType::DELIVERY}, "ItemsMessage");
+        const auto& items_json = j.at("items");
+        items_json.get_to(parsed.items);
+
+        if (parsed.type == MessageType::MENU_RESPONSE) {
+            for (const auto field : {"coffee", "tea", "croissant"}) {
+                if (!items_json.contains(field)) {
+                    throw ProtocolException(ErrorCode::MISSING_FIELD,
+                        std::string("Stock report missing required product field: ") + field);
+                }
+            }
+        } else if (parsed.type == MessageType::ORDER_REQUEST && !detail::has_positive_item(parsed.items)) {
+            throw ProtocolException(ErrorCode::INVALID_QUANTITY,
+                "Order must contain at least one item with positive quantity");
+        } else if (parsed.type == MessageType::DELIVERY && !detail::has_positive_item(parsed.items)) {
+            throw ProtocolException(ErrorCode::INVALID_DELIVERY,
+                "Delivery must contain at least one item with positive quantity");
+        }
+        msg = parsed;
+    }
+
+    // AcceptedMessage (ORDER_ACCEPTED)
+    void to_json(json& j, const AcceptedMessage& msg) {
+        detail::validate_message_type(msg.type, {MessageType::ORDER_ACCEPTED}, "AcceptedMessage");
+        if (msg.orderId <= 0) {
+            throw ProtocolException(ErrorCode::INVALID_MESSAGE, "orderId must be positive");
+        }
+        if (msg.preparationTime < 0) {
+            throw ProtocolException(ErrorCode::INVALID_MESSAGE, "preparationTime cannot be negative");
+        }
+        j = json{
+            {"type", msg.type},
+            {"orderId", msg.orderId},
+            {"preparationTime", msg.preparationTime}
+        };
+    }
+
+    void from_json(const json& j, AcceptedMessage& msg) {
+        detail::validate_object_keys(j, {"type", "orderId", "preparationTime"},
+            {"type", "orderId", "preparationTime"});
+        AcceptedMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type, {MessageType::ORDER_ACCEPTED}, "AcceptedMessage");
+        constexpr int max_int = std::numeric_limits<int>::max();
+        parsed.orderId = detail::parse_int(j.at("orderId"), "orderId", 1, max_int, ErrorCode::INVALID_MESSAGE);
+        parsed.preparationTime = detail::parse_int(j.at("preparationTime"), "preparationTime", 0, max_int, ErrorCode::INVALID_MESSAGE);
+        msg = parsed;
+    }
+
+    // RefusedMessage (ORDER_REFUSED)
+    void to_json(json& j, const RefusedMessage& msg) {
+        detail::validate_message_type(msg.type, {MessageType::ORDER_REFUSED}, "RefusedMessage");
+        j = json{
+            {"type", msg.type},
+            {"reason", msg.reason}
+        };
+    }
+
+    void from_json(const json& j, RefusedMessage& msg) {
+        detail::validate_object_keys(j, {"type", "reason"}, {"type", "reason"});
+        RefusedMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type, {MessageType::ORDER_REFUSED}, "RefusedMessage");
+        parsed.reason = detail::parse_string_field(j, "reason");
+        msg = std::move(parsed);
+    }
+
+    // OrderIdMessage (ORDER_READY)
+    void to_json(json& j, const OrderIdMessage& msg) {
+        detail::validate_message_type(msg.type, {MessageType::ORDER_READY}, "OrderIdMessage");
+        if (msg.orderId <= 0) {
+            throw ProtocolException(ErrorCode::INVALID_MESSAGE, "orderId must be positive");
+        }
+        j = json{
+            {"type", msg.type},
+            {"orderId", msg.orderId}
+        };
+    }
+
+    void from_json(const json& j, OrderIdMessage& msg) {
+        detail::validate_object_keys(j, {"type", "orderId"}, {"type", "orderId"});
+        OrderIdMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type, {MessageType::ORDER_READY}, "OrderIdMessage");
+        parsed.orderId = detail::parse_int(j.at("orderId"), "orderId", 1, std::numeric_limits<int>::max(), ErrorCode::INVALID_MESSAGE);
+        msg = parsed;
+    }
+
+    // LowStockMessage (LOW_STOCK)
+    void to_json(json& j, const LowStockMessage& msg) {
+        detail::validate_message_type(msg.type, {MessageType::LOW_STOCK}, "LowStockMessage");
+        if (msg.remaining < 0 || msg.remaining > 4) {
+            throw ProtocolException(ErrorCode::INVALID_QUANTITY, "remaining must be between 0 and 4");
+        }
+        j = json{
+            {"type", msg.type},
+            {"product", msg.product},
+            {"remaining", msg.remaining}
+        };
+    }
+
+    void from_json(const json& j, LowStockMessage& msg) {
+        detail::validate_object_keys(j, {"type", "product", "remaining"}, {"type", "product", "remaining"});
+        LowStockMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type, {MessageType::LOW_STOCK}, "LowStockMessage");
+        j.at("product").get_to(parsed.product);
+        parsed.remaining = detail::parse_int(j.at("remaining"), "remaining", 0, 4, ErrorCode::INVALID_QUANTITY);
+        msg = parsed;
+    }
+
+    // ErrorMessage (ERROR)
+    void to_json(json& j, const ErrorMessage& msg) {
+        detail::validate_message_type(msg.type, {MessageType::ERROR}, "ErrorMessage");
+        j = json{
+            {"type", msg.type},
+            {"code", msg.code},
+            {"message", msg.message}
+        };
+    }
+
+    void from_json(const json& j, ErrorMessage& msg) {
+        detail::validate_object_keys(j, {"type", "code", "message"}, {"type", "code", "message"});
+        ErrorMessage parsed{};
+        j.at("type").get_to(parsed.type);
+        detail::validate_message_type(parsed.type, {MessageType::ERROR}, "ErrorMessage");
+        j.at("code").get_to(parsed.code);
+        parsed.message = detail::parse_string_field(j, "message");
+        msg = std::move(parsed);
+    }
+
+    MessageType parse_message_type(const json& j) {
+        if (!j.is_object()) {
+            throw ProtocolException(ErrorCode::INVALID_MESSAGE, "Message must be a JSON object");
+        }
+        if (!j.contains("type")) {
+            throw ProtocolException(ErrorCode::MISSING_FIELD, "Missing required field: type");
+        }
+        return j.at("type").get<MessageType>();
+    }
+
+    AnyMessage deserialize_message(const json& j) {
+        switch (parse_message_type(j)) {
+            case MessageType::MENU_REQUEST:
+            case MessageType::PROVIDER_IDENTIFY:
+            case MessageType::HEARTBEAT:
+                return j.get<EmptyMessage>();
+            case MessageType::ORDER_REQUEST:
+            case MessageType::MENU_RESPONSE:
+            case MessageType::DELIVERY:
+                return j.get<ItemsMessage>();
+            case MessageType::ORDER_ACCEPTED:
+                return j.get<AcceptedMessage>();
+            case MessageType::ORDER_REFUSED:
+                return j.get<RefusedMessage>();
+            case MessageType::ORDER_READY:
+                return j.get<OrderIdMessage>();
+            case MessageType::LOW_STOCK:
+                return j.get<LowStockMessage>();
+            case MessageType::ERROR:
+                return j.get<ErrorMessage>();
+        }
+        throw ProtocolException(ErrorCode::INVALID_MESSAGE, "Unknown message type");
+    }
+
 }

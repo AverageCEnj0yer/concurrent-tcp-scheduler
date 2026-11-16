@@ -72,6 +72,38 @@ namespace protocol{
     void to_json(json& j, const Items& items);
     void from_json(const json& j, Items& items);
 
+    // EmptyMessage (MENU_REQUEST, PROVIDER_IDENTIFY, HEARTBEAT)
+    void to_json(json& j, const EmptyMessage& msg);
+    void from_json(const json& j, EmptyMessage& msg);
+
+    // ItemsMessage (ORDER_REQUEST, MENU_RESPONSE, DELIVERY)
+    void to_json(json& j, const ItemsMessage& msg);
+    void from_json(const json& j, ItemsMessage& msg);
+
+    // AcceptedMessage (ORDER_ACCEPTED)
+    void to_json(json& j, const AcceptedMessage& msg);
+    void from_json(const json& j, AcceptedMessage& msg);
+
+    // RefusedMessage (ORDER_REFUSED)
+    void to_json(json& j, const RefusedMessage& msg);
+    void from_json(const json& j, RefusedMessage& msg);
+
+    // OrderIdMessage (ORDER_READY)
+    void to_json(json& j, const OrderIdMessage& msg);
+    void from_json(const json& j, OrderIdMessage& msg);
+
+    // LowStockMessage (LOW_STOCK)
+    void to_json(json& j, const LowStockMessage& msg);
+    void from_json(const json& j, LowStockMessage& msg);
+
+    // ErrorMessage (ERROR)
+    void to_json(json& j, const ErrorMessage& msg);
+    void from_json(const json& j, ErrorMessage& msg);
+
+    // Top-level message type inspection & variant dispatch
+    MessageType parse_message_type(const json& j);
+    AnyMessage deserialize_message(const json& j);
+
 }
 
 #endif
