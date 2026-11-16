@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(server_core STATIC
     src/concurrency/ThreadPool.cpp
+    src/protocol/ProtocolJson.cpp
 )
 
 target_include_directories(server_core PUBLIC include)
