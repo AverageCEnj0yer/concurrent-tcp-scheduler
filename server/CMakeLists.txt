@@ -21,6 +21,7 @@ add_library(server_core STATIC
     src/concurrency/ThreadPool.cpp
     src/protocol/ProtocolJson.cpp
     src/server/NetUtils.cpp
+    src/server/ClientSession.cpp
 )
 
 target_include_directories(server_core PUBLIC include)
