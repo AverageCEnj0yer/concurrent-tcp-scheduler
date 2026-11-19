@@ -22,6 +22,7 @@ add_library(server_core STATIC
     src/protocol/ProtocolJson.cpp
     src/server/NetUtils.cpp
     src/server/ClientSession.cpp
+    src/server/CoffeeShopServer.cpp
 )
 
 target_include_directories(server_core PUBLIC include)
@@ -30,6 +31,19 @@ target_link_libraries(server_core PUBLIC
     Threads::Threads
 )
 target_compile_options(server_core PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror
+    -Wshadow
+    -Wconversion
+    -Wsign-conversion
+    -Wnull-dereference
+)
+
+add_executable(server src/main.cpp)
+target_link_libraries(server PRIVATE server_core)
+target_compile_options(server PRIVATE
     -Wall
     -Wextra
     -Wpedantic
