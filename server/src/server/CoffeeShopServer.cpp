@@ -15,9 +15,10 @@
 #include <cstring>
 #include <iostream>
 #include <random>
-#include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 CoffeeShopServer::CoffeeShopServer(std::size_t worker_count)
     : pool_(worker_count),
@@ -143,6 +144,60 @@ void CoffeeShopServer::log(std::string_view endpoint, std::string_view message) 
     std::cout << "[" << endpoint << "] " << message << "\n";
 }
 
+void CoffeeShopServer::send_error(const std::shared_ptr<ClientSession>& session,
+                                  protocol::ErrorCode code,
+                                  std::string_view message) {
+    log(session->endpoint,
+        "ERROR (" + std::string(protocol::to_string(code)) + "): " + std::string(message));
+    const protocol::ErrorMessage err{
+        protocol::MessageType::ERROR,
+        code,
+        std::string(message)
+    };
+    session->send_json(err);
+}
+
+void CoffeeShopServer::handle_menu_request(const std::shared_ptr<ClientSession>& session) {
+    protocol::Items snapshot{};
+    {
+        std::lock_guard lock{stock_mutex_};
+        snapshot = stock_;
+    }
+    session->send_json(protocol::ItemsMessage{
+        protocol::MessageType::MENU_RESPONSE,
+        snapshot
+    });
+}
+
+void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line) {
+    try {
+        const auto j = protocol::json::parse(line);
+        const auto msg = protocol::deserialize_message(j);
+
+        std::visit([&](const auto& m) {
+            using T = std::decay_t<decltype(m)>;
+            if constexpr (std::is_same_v<T, protocol::EmptyMessage>) {
+                switch (m.type) {
+                    case protocol::MessageType::MENU_REQUEST:
+                        handle_menu_request(session);
+                        break;
+                    default:
+                        send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
+                            "Unexpected message type");
+                        break;
+                }
+            } else {
+                send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
+                    "Clients cannot send server-only message types");
+            }
+        }, msg);
+    } catch (const protocol::ProtocolException& e) {
+        send_error(session, e.code(), e.what());
+    } catch (const protocol::json::parse_error& e) {
+        send_error(session, protocol::ErrorCode::INVALID_MESSAGE, e.what());
+    }
+}
+
 void CoffeeShopServer::disconnect_session(const std::shared_ptr<ClientSession>& session, std::string_view reason) {
     bool already_disconnected = false;
     {
@@ -167,7 +222,9 @@ void CoffeeShopServer::disconnect_session(const std::shared_ptr<ClientSession>& 
 }
 
 void CoffeeShopServer::handle_client(const std::shared_ptr<ClientSession>& session) {
+    std::string line_buffer;
     std::array<char, RECV_CHUNK_BYTES> chunk{};
+    bool discarding_oversized_line = false;
     std::string disconnect_reason = "Connection closed";
 
     while (true) {
@@ -202,6 +259,44 @@ void CoffeeShopServer::handle_client(const std::shared_ptr<ClientSession>& sessi
             }
             disconnect_reason = std::string("recv error: ") + std::strerror(errno);
             break;
+        }
+
+        line_buffer.append(chunk.data(), static_cast<std::size_t>(bytes_read));
+
+        while (true) {
+            const std::size_t nl = line_buffer.find('\n');
+            if (nl == std::string::npos) {
+                if (line_buffer.size() > MAX_LINE_BYTES) {
+                    if (!discarding_oversized_line) {
+                        send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
+                            "Message exceeds maximum allowed length");
+                        discarding_oversized_line = true;
+                    }
+                    line_buffer.clear();
+                }
+                break;
+            }
+
+            if (discarding_oversized_line) {
+                line_buffer.erase(0, nl + 1);
+                discarding_oversized_line = false;
+                continue;
+            }
+
+            if (nl > MAX_LINE_BYTES) {
+                line_buffer.erase(0, nl + 1);
+                send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
+                    "Message exceeds maximum allowed length");
+                continue;
+            }
+
+            std::string line = line_buffer.substr(0, nl);
+            line_buffer.erase(0, nl + 1);
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+
+            dispatch_line(session, line);
         }
     }
 

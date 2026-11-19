@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -22,6 +23,14 @@ private:
     static protocol::Items generate_initial_stock();
 
     void log(std::string_view endpoint, std::string_view message);
+
+    void send_error(const std::shared_ptr<ClientSession>& session,
+                    protocol::ErrorCode code,
+                    std::string_view message);
+
+    void handle_menu_request(const std::shared_ptr<ClientSession>& session);
+
+    void dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line);
 
     void disconnect_session(const std::shared_ptr<ClientSession>& session, std::string_view reason);
 
