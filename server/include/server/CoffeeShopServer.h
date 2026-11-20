@@ -30,6 +30,8 @@ private:
 
     void handle_menu_request(const std::shared_ptr<ClientSession>& session);
 
+    void handle_order_request(const std::shared_ptr<ClientSession>& session, const protocol::Items& items);
+
     void dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line);
 
     void disconnect_session(const std::shared_ptr<ClientSession>& session, std::string_view reason);
@@ -40,6 +42,7 @@ private:
 
     std::mutex stock_mutex_;
     protocol::Items stock_{};
+    int next_order_id_{1};
 
     std::mutex sessions_mutex_;
     std::vector<std::weak_ptr<ClientSession>> sessions_;

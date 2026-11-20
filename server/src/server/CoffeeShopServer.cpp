@@ -1,5 +1,6 @@
 #include <server/CoffeeShopServer.h>
 #include <server/NetUtils.h>
+#include <server/OrderRecord.h>
 #include <server/ServerConfig.h>
 
 #include <arpa/inet.h>
@@ -11,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -169,6 +171,68 @@ void CoffeeShopServer::handle_menu_request(const std::shared_ptr<ClientSession>&
     });
 }
 
+void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>& session, const protocol::Items& items) {
+    int order_id = 0;
+    std::string refusal_reason;
+
+    {
+        std::lock_guard lock{stock_mutex_};
+        if (stock_.coffee < items.coffee) {
+            refusal_reason = "Insufficient coffee (requested " + std::to_string(items.coffee) +
+                             ", available " + std::to_string(stock_.coffee) + ")";
+        } else if (stock_.tea < items.tea) {
+            refusal_reason = "Insufficient tea (requested " + std::to_string(items.tea) +
+                             ", available " + std::to_string(stock_.tea) + ")";
+        } else if (stock_.croissant < items.croissant) {
+            refusal_reason = "Insufficient croissant (requested " + std::to_string(items.croissant) +
+                             ", available " + std::to_string(stock_.croissant) + ")";
+        } else {
+            stock_.coffee -= items.coffee;
+            stock_.tea -= items.tea;
+            stock_.croissant -= items.croissant;
+            order_id = next_order_id_++;
+        }
+    }
+
+    if (!refusal_reason.empty()) {
+        log(session->endpoint, "ORDER REFUSED: " + refusal_reason);
+        session->send_json(protocol::RefusedMessage{
+            protocol::MessageType::ORDER_REFUSED,
+            refusal_reason
+        });
+        return;
+    }
+
+    const int prep_time = compute_prep_time(items);
+    auto order = std::make_shared<OrderRecord>();
+    order->order_id = order_id;
+    order->client_ip = session->ip;
+    order->client_port = session->port;
+    order->items = items;
+
+    log(session->endpoint,
+        "ORDER ACCEPTED #" + std::to_string(order_id) +
+        " (" + format_items(items) + "), eta=" + std::to_string(prep_time) + "s");
+
+    session->send_json(protocol::AcceptedMessage{
+        protocol::MessageType::ORDER_ACCEPTED,
+        order_id,
+        prep_time
+    });
+
+    (void)pool_.submitTask([this, session, order, prep_time]() {
+        std::this_thread::sleep_for(std::chrono::seconds(prep_time));
+
+        log(order->client_ip + ":" + std::to_string(order->client_port),
+            "ORDER READY #" + std::to_string(order->order_id));
+
+        session->send_json(protocol::OrderIdMessage{
+            protocol::MessageType::ORDER_READY,
+            order->order_id
+        });
+    });
+}
+
 void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line) {
     try {
         const auto j = protocol::json::parse(line);
@@ -184,6 +248,16 @@ void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& sessi
                     default:
                         send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
                             "Unexpected message type");
+                        break;
+                }
+            } else if constexpr (std::is_same_v<T, protocol::ItemsMessage>) {
+                switch (m.type) {
+                    case protocol::MessageType::ORDER_REQUEST:
+                        handle_order_request(session, m.items);
+                        break;
+                    default:
+                        send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
+                            "Clients cannot send server response messages");
                         break;
                 }
             } else {
