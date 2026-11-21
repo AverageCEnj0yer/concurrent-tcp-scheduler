@@ -32,6 +32,8 @@ private:
 
     void notify_provider(const std::vector<protocol::LowStockMessage>& alerts);
 
+    void restore_stock(const protocol::Items& items);
+
     void handle_menu_request(const std::shared_ptr<ClientSession>& session);
 
     void handle_provider_identify(const std::shared_ptr<ClientSession>& session);

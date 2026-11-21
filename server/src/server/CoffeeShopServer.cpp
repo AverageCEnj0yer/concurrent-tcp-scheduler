@@ -13,11 +13,13 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <random>
+#include <stop_token>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -194,6 +196,13 @@ void CoffeeShopServer::notify_provider(const std::vector<protocol::LowStockMessa
     }
 }
 
+void CoffeeShopServer::restore_stock(const protocol::Items& items) {
+    std::lock_guard lock{stock_mutex_};
+    stock_.coffee += items.coffee;
+    stock_.tea += items.tea;
+    stock_.croissant += items.croissant;
+}
+
 void CoffeeShopServer::handle_menu_request(const std::shared_ptr<ClientSession>& session) {
     protocol::Items snapshot{};
     {
@@ -314,6 +323,20 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
     order->client_port = session->port;
     order->items = items;
 
+    bool session_alive = true;
+    {
+        std::lock_guard lock{session->orders_mutex};
+        if (session->disconnected) {
+            session_alive = false;
+        } else {
+            session->active_orders.push_back(order);
+        }
+    }
+    if (!session_alive) {
+        restore_stock(items);
+        return;
+    }
+
     log(session->endpoint,
         "ORDER ACCEPTED #" + std::to_string(order_id) +
         " (" + format_items(items) + "), eta=" + std::to_string(prep_time) + "s");
@@ -326,8 +349,43 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
 
     notify_provider(alerts);
 
-    (void)pool_.submitTask([this, session, order, prep_time]() {
-        std::this_thread::sleep_for(std::chrono::seconds(prep_time));
+    auto stop_tok = order->stop_source.get_token();
+    (void)pool_.submitTask([this, session, order, prep_time, stop_tok]() {
+        if (stop_tok.stop_requested()) {
+            if (!order->finalized.exchange(true)) {
+                restore_stock(order->items);
+            }
+            return;
+        }
+
+        std::mutex wait_mutex;
+        std::unique_lock wait_lock{wait_mutex};
+        std::condition_variable_any cv;
+        const bool stopped = cv.wait_for(
+            wait_lock,
+            stop_tok,
+            std::chrono::seconds(prep_time),
+            [&stop_tok] { return stop_tok.stop_requested(); }
+        );
+
+        if (stopped || stop_tok.stop_requested()) {
+            if (!order->finalized.exchange(true)) {
+                restore_stock(order->items);
+                log(order->client_ip + ":" + std::to_string(order->client_port),
+                    "ORDER CANCELLED #" + std::to_string(order->order_id) +
+                    " mid-preparation; stock restored (" + format_items(order->items) + ")");
+            }
+            return;
+        }
+
+        if (order->finalized.exchange(true)) {
+            return;
+        }
+
+        {
+            std::lock_guard lock{session->orders_mutex};
+            std::erase(session->active_orders, order);
+        }
 
         log(order->client_ip + ":" + std::to_string(order->client_port),
             "ORDER READY #" + std::to_string(order->order_id));
@@ -391,15 +449,35 @@ void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& sessi
 }
 
 void CoffeeShopServer::disconnect_session(const std::shared_ptr<ClientSession>& session, std::string_view reason) {
+    std::vector<std::shared_ptr<OrderRecord>> to_cancel;
     bool already_disconnected = false;
     {
         std::lock_guard lock{session->orders_mutex};
         already_disconnected = session->disconnected;
         session->disconnected = true;
+        to_cancel = std::move(session->active_orders);
+        session->active_orders.clear();
     }
 
     if (!already_disconnected) {
         log(session->endpoint, "Disconnected: " + std::string(reason));
+    }
+
+    protocol::Items restored_total{};
+    for (const auto& order : to_cancel) {
+        order->stop_source.request_stop();
+        if (!order->finalized.exchange(true)) {
+            restored_total.coffee += order->items.coffee;
+            restored_total.tea += order->items.tea;
+            restored_total.croissant += order->items.croissant;
+            log(session->endpoint,
+                "ORDER CANCELLED #" + std::to_string(order->order_id) +
+                " (restored " + format_items(order->items) + ")");
+        }
+    }
+
+    if (restored_total.coffee > 0 || restored_total.tea > 0 || restored_total.croissant > 0) {
+        restore_stock(restored_total);
     }
 
     if (session->is_provider.load()) {
