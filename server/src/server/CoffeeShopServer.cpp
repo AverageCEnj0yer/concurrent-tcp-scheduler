@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <thread>
 #include <type_traits>
@@ -159,6 +160,40 @@ void CoffeeShopServer::send_error(const std::shared_ptr<ClientSession>& session,
     session->send_json(err);
 }
 
+std::vector<protocol::LowStockMessage> CoffeeShopServer::collect_low_stock_all_locked() const {
+    std::vector<protocol::LowStockMessage> alerts;
+    if (stock_.coffee < LOW_STOCK_THRESHOLD) {
+        alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::coffee, stock_.coffee});
+    }
+    if (stock_.tea < LOW_STOCK_THRESHOLD) {
+        alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::tea, stock_.tea});
+    }
+    if (stock_.croissant < LOW_STOCK_THRESHOLD) {
+        alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::croissant, stock_.croissant});
+    }
+    return alerts;
+}
+
+void CoffeeShopServer::notify_provider(const std::vector<protocol::LowStockMessage>& alerts) {
+    if (alerts.empty()) {
+        return;
+    }
+    std::shared_ptr<ClientSession> provider;
+    {
+        std::lock_guard lock{provider_mutex_};
+        provider = active_provider_;
+    }
+    if (!provider) {
+        return;
+    }
+    for (const auto& alert : alerts) {
+        log(provider->endpoint,
+            "LOW_STOCK alert: " + std::string(protocol::to_string(alert.product)) +
+            " remaining=" + std::to_string(alert.remaining));
+        provider->send_json(alert);
+    }
+}
+
 void CoffeeShopServer::handle_menu_request(const std::shared_ptr<ClientSession>& session) {
     protocol::Items snapshot{};
     {
@@ -171,9 +206,68 @@ void CoffeeShopServer::handle_menu_request(const std::shared_ptr<ClientSession>&
     });
 }
 
+void CoffeeShopServer::handle_provider_identify(const std::shared_ptr<ClientSession>& session) {
+    const bool first_time = !session->is_provider.exchange(true);
+    {
+        std::lock_guard lock{provider_mutex_};
+        active_provider_ = session;
+    }
+    if (first_time) {
+        log(session->endpoint, "Identified as PROVIDER");
+    }
+
+    std::vector<protocol::LowStockMessage> alerts;
+    {
+        std::lock_guard lock{stock_mutex_};
+        alerts = collect_low_stock_all_locked();
+    }
+    for (const auto& alert : alerts) {
+        log(session->endpoint,
+            "LOW_STOCK alert on connect: " +
+            std::string(protocol::to_string(alert.product)) +
+            " remaining=" + std::to_string(alert.remaining));
+        session->send_json(alert);
+    }
+}
+
+void CoffeeShopServer::handle_delivery(const std::shared_ptr<ClientSession>& session, const protocol::Items& items) {
+    if (!session->is_provider.load()) {
+        send_error(session, protocol::ErrorCode::UNAUTHORIZED_OPERATION,
+            "Only an identified provider connection can send deliveries");
+        return;
+    }
+
+    protocol::Items updated{};
+    bool overflow = false;
+    {
+        std::lock_guard lock{stock_mutex_};
+        constexpr int max_int = std::numeric_limits<int>::max();
+        if (items.coffee > max_int - stock_.coffee ||
+            items.tea > max_int - stock_.tea ||
+            items.croissant > max_int - stock_.croissant) {
+            overflow = true;
+        } else {
+            stock_.coffee += items.coffee;
+            stock_.tea += items.tea;
+            stock_.croissant += items.croissant;
+            updated = stock_;
+        }
+    }
+
+    if (overflow) {
+        send_error(session, protocol::ErrorCode::INVALID_DELIVERY,
+            "Delivery exceeds maximum stock capacity");
+        return;
+    }
+
+    log(session->endpoint,
+        "DELIVERY received (" + format_items(items) + ") | Stock: " + format_items(updated));
+}
+
 void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>& session, const protocol::Items& items) {
     int order_id = 0;
     std::string refusal_reason;
+    std::vector<protocol::LowStockMessage> alerts;
 
     {
         std::lock_guard lock{stock_mutex_};
@@ -191,6 +285,16 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
             stock_.tea -= items.tea;
             stock_.croissant -= items.croissant;
             order_id = next_order_id_++;
+
+            if (items.coffee > 0 && stock_.coffee < LOW_STOCK_THRESHOLD) {
+                alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::coffee, stock_.coffee});
+            }
+            if (items.tea > 0 && stock_.tea < LOW_STOCK_THRESHOLD) {
+                alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::tea, stock_.tea});
+            }
+            if (items.croissant > 0 && stock_.croissant < LOW_STOCK_THRESHOLD) {
+                alerts.push_back({protocol::MessageType::LOW_STOCK, protocol::Product::croissant, stock_.croissant});
+            }
         }
     }
 
@@ -220,6 +324,8 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
         prep_time
     });
 
+    notify_provider(alerts);
+
     (void)pool_.submitTask([this, session, order, prep_time]() {
         std::this_thread::sleep_for(std::chrono::seconds(prep_time));
 
@@ -236,6 +342,12 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
 void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line) {
     try {
         const auto j = protocol::json::parse(line);
+        if (protocol::parse_message_type(j) == protocol::MessageType::DELIVERY &&
+            !session->is_provider.load()) {
+            send_error(session, protocol::ErrorCode::UNAUTHORIZED_OPERATION,
+                "Only an identified provider connection can send deliveries");
+            return;
+        }
         const auto msg = protocol::deserialize_message(j);
 
         std::visit([&](const auto& m) {
@@ -244,6 +356,9 @@ void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& sessi
                 switch (m.type) {
                     case protocol::MessageType::MENU_REQUEST:
                         handle_menu_request(session);
+                        break;
+                    case protocol::MessageType::PROVIDER_IDENTIFY:
+                        handle_provider_identify(session);
                         break;
                     default:
                         send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
@@ -254,6 +369,9 @@ void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& sessi
                 switch (m.type) {
                     case protocol::MessageType::ORDER_REQUEST:
                         handle_order_request(session, m.items);
+                        break;
+                    case protocol::MessageType::DELIVERY:
+                        handle_delivery(session, m.items);
                         break;
                     default:
                         send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
@@ -282,6 +400,13 @@ void CoffeeShopServer::disconnect_session(const std::shared_ptr<ClientSession>& 
 
     if (!already_disconnected) {
         log(session->endpoint, "Disconnected: " + std::string(reason));
+    }
+
+    if (session->is_provider.load()) {
+        std::lock_guard lock{provider_mutex_};
+        if (active_provider_ == session) {
+            active_provider_.reset();
+        }
     }
 
     session->close_socket();
