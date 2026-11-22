@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -72,7 +73,7 @@ int CoffeeShopServer::run(std::uint16_t port) {
     };
     std::vector<ClientWorker> client_workers;
 
-    while (true) {
+    while (!g_shutdown_requested) {
         std::erase_if(client_workers, [](const ClientWorker& w) {
             return w.done->load();
         });
@@ -132,6 +133,20 @@ int CoffeeShopServer::run(std::uint16_t port) {
     }
 
     close(listen_fd);
+    // Stop all active sessions on server shutdown so client and worker threads wake promptly.
+    std::vector<std::shared_ptr<ClientSession>> remaining_sessions;
+    {
+        std::lock_guard lock{sessions_mutex_};
+        for (const auto& weak : sessions_) {
+            if (auto s = weak.lock()) {
+                remaining_sessions.push_back(std::move(s));
+            }
+        }
+        sessions_.clear();
+    }
+    for (const auto& s : remaining_sessions) {
+        disconnect_session(s, "Server shutting down");
+    }
     client_workers.clear();
     log("server", "Server stopped");
     return 0;
@@ -397,7 +412,9 @@ void CoffeeShopServer::handle_order_request(const std::shared_ptr<ClientSession>
     });
 }
 
-void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line) {
+void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& session,
+                                     const std::string& line,
+                                     std::chrono::steady_clock::time_point& last_heartbeat) {
     try {
         const auto j = protocol::json::parse(line);
         if (protocol::parse_message_type(j) == protocol::MessageType::DELIVERY &&
@@ -417,6 +434,9 @@ void CoffeeShopServer::dispatch_line(const std::shared_ptr<ClientSession>& sessi
                         break;
                     case protocol::MessageType::PROVIDER_IDENTIFY:
                         handle_provider_identify(session);
+                        break;
+                    case protocol::MessageType::HEARTBEAT:
+                        last_heartbeat = std::chrono::steady_clock::now();
                         break;
                     default:
                         send_error(session, protocol::ErrorCode::INVALID_MESSAGE,
@@ -502,14 +522,29 @@ void CoffeeShopServer::handle_client(const std::shared_ptr<ClientSession>& sessi
     std::string line_buffer;
     std::array<char, RECV_CHUNK_BYTES> chunk{};
     bool discarding_oversized_line = false;
+    auto last_heartbeat = std::chrono::steady_clock::now();
     std::string disconnect_reason = "Connection closed";
 
-    while (true) {
+    while (!g_shutdown_requested) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = now - last_heartbeat;
+        if (elapsed >= HEARTBEAT_TIMEOUT) {
+            disconnect_reason = "Heartbeat timeout (no HEARTBEAT within 3s)";
+            break;
+        }
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            HEARTBEAT_TIMEOUT - elapsed
+        );
+        const int wait_ms = static_cast<int>(
+            std::min<std::chrono::milliseconds::rep>(remaining.count(), POLL_SLICE_MS)
+        );
+
         pollfd pfd{};
         pfd.fd = session->fd;
         pfd.events = POLLIN;
 
-        const int ready = poll(&pfd, 1, POLL_SLICE_MS);
+        const int ready = poll(&pfd, 1, std::max(1, wait_ms));
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -573,9 +608,12 @@ void CoffeeShopServer::handle_client(const std::shared_ptr<ClientSession>& sessi
                 line.pop_back();
             }
 
-            dispatch_line(session, line);
+            dispatch_line(session, line, last_heartbeat);
         }
     }
 
+    if (g_shutdown_requested) {
+        disconnect_reason = "Server shutting down";
+    }
     disconnect_session(session, disconnect_reason);
 }

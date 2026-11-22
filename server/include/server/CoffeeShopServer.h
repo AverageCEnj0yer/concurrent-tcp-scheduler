@@ -5,6 +5,7 @@
 #include <protocol/Protocol.h>
 #include <server/ClientSession.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -42,7 +43,9 @@ private:
 
     void handle_order_request(const std::shared_ptr<ClientSession>& session, const protocol::Items& items);
 
-    void dispatch_line(const std::shared_ptr<ClientSession>& session, const std::string& line);
+    void dispatch_line(const std::shared_ptr<ClientSession>& session,
+                       const std::string& line,
+                       std::chrono::steady_clock::time_point& last_heartbeat);
 
     void disconnect_session(const std::shared_ptr<ClientSession>& session, std::string_view reason);
 
